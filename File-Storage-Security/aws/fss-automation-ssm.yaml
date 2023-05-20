@@ -1,0 +1,337 @@
+description: |
+  ---
+  # Trend Cloud One File Storage Security - SupportCollectionTool
+  ---
+  This SSM Automation is purposed for collecting Logs from FSS deployed Lambda Functions in order to aid in troubleshooting.
+  ## Requirements
+  Provide the following parameters 
+
+  1. Scanner Stack Name
+  2. Storage Stack Name
+  3. IAM Role ARN to assume execution
+  4. S3 bucket name to output execution artifact
+schemaVersion: '0.3'
+assumeRole: '{{AutomationAssumeRole}}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: (Required) The ARN of the role that allows Automation to perform the actions on your behalf
+  ScannerStackName:
+    type: String
+    description: Name of the FSS Scanner Stack
+  StorageStackName:
+    type: String
+    description: Name of the FSS Storage Stack
+  ArtifactBucket:
+    type: String
+    description: Name of an S3 bucket to send Automation output
+mainSteps:
+  - name: FSSGatherStackProvidedParameters
+    action: 'aws:executeScript'
+    description: Gather the Parameter Values inputted on the FSS stack CFT's
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |-
+        import boto3
+        import json
+
+        def describe_stack_parameters(stack_name):
+            # CloudFormation client
+            cf_client = boto3.client('cloudformation')
+
+            # Describe stack
+            response = cf_client.describe_stacks(StackName=stack_name)
+            stack = response['Stacks'][0]
+
+            # Get stack parameters
+            parameters = stack.get('Parameters', [])
+
+            # Extract parameter names and values
+            parameter_values = {}
+            for parameter in parameters:
+                parameter_name = parameter['ParameterKey']
+                parameter_value = parameter['ParameterValue']
+                parameter_values[parameter_name] = parameter_value
+
+            return parameter_values
+
+        StackParams = []
+
+        def script_handler(events, context):
+          s3_client = boto3.client('s3')
+          bucket_name = events['artifactbucket']  # Replace with your S3 bucket name
+          automation_execution_id = context['automation:EXECUTION_ID']
+          
+          # Gather Provided Stack Params
+          Scanner = describe_stack_parameters(stack_name=events['scanner'])
+          StackParams.append({'ScannerStack': Scanner})
+          Storage = describe_stack_parameters(stack_name=events['storage'])
+          StackParams.append({'ScannerStack': Storage})
+          
+          # Save parameter log events to an S3 bucket with automation execution ID as prefix
+          object_key = f"fss-support-tool/{automation_execution_id}/stack_params.json"
+          s3_client.put_object(Body=json.dumps(StackParams), Bucket=bucket_name, Key=object_key)
+
+          # Create a reference to the S3 object in the output field
+          s3_url = f"s3://{bucket_name}/{object_key}"
+          
+          return {'stackparamsS3Url': s3_url}
+      InputPayload:
+        scanner: '{{ScannerStackName}}'
+        storage: '{{StorageStackName}}'
+        artifactbucket: '{{ArtifactBucket}}'
+    outputs:
+      - Selector: $.Payload.stackparamsS3Url
+        Name: StackParameters
+        Type: String
+  - name: CloudFormationLogGroupStreamNameCollection
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |-
+        import boto3
+        def get_resource_physical_id(stack_name, logical_id):
+            # CloudFormation client
+            cf_client = boto3.client('cloudformation')
+
+            # Describe stack resources
+            response = cf_client.describe_stack_resources(StackName=stack_name)
+            stack_resources = response['StackResources']
+
+            # Find resource with the logical ID
+            for resource in stack_resources:
+                if resource['LogicalResourceId'] == logical_id:
+                    return resource['PhysicalResourceId']
+
+            return None
+        def script_handler(events, context):
+          ScannerLogs = get_resource_physical_id(stack_name= events['parameter1'], logical_id= 'ScannerLogGroup')
+          ListenerLogs = get_resource_physical_id(stack_name= events['parameter2'], logical_id= 'BucketListenerLogGroup')
+          PostTagLogs = get_resource_physical_id(stack_name= events['parameter2'], logical_id= 'PostScanActionTagLogGroup')
+          return {'listenerloggroupname': ListenerLogs, 'scannerloggroupname': ScannerLogs, 'posttagloggroupname': PostTagLogs}
+      InputPayload:
+        parameter1: '{{ScannerStackName}}'
+        parameter2: '{{StorageStackName}}'
+    outputs:
+      - Selector: $.Payload.listenerloggroupname
+        Name: listenerloggroupname
+        Type: String
+      - Name: scannerloggroupname
+        Type: String
+        Selector: $.Payload.scannerloggroupname
+      - Name: posttagloggroupname
+        Selector: $.Payload.posttagloggroupname
+        Type: String
+    description: Collect the Log event Streams for each FSS lambda in deployment
+  - name: CollectBucketListenerLambdaLogs
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |
+        import boto3
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        def script_handler(events, context):
+            # Set the AWS region and CloudWatch Logs client
+            client = boto3.client('logs')
+          
+            # Get the current time in the specified time zone
+            current_time = datetime.now()
+            end_time = current_time
+            start_time = end_time - timedelta(minutes=5)
+          
+            # Round the milliseconds to the nearest thousandth
+            start_time_rounded = start_time.replace(microsecond=(start_time.microsecond // 1000) * 1000)
+            end_time_rounded = end_time.replace(microsecond=(end_time.microsecond // 1000) * 1000)
+          
+            # Convert start and end times to UTC
+            start_time_utc = start_time_rounded.replace(tzinfo=timezone.utc)
+            end_time_utc = end_time_rounded.replace(tzinfo=timezone.utc)
+          
+            # Convert start and end times to UNIX timestamps
+            start_timestamp = int(start_time_utc.timestamp() * 1000)
+            end_timestamp = int(end_time_utc.timestamp() * 1000)
+          
+            # Specify the log group name and query the log events within the time range
+            log_group_name = events["listener"]  # Replace with your log group name
+            response = client.filter_log_events(
+                logGroupName=log_group_name,
+                startTime=start_timestamp,
+                endTime=end_timestamp
+            )
+          
+            log_events = []
+          
+            # Process the log events
+            if 'events' in response:
+                for event in response['events']:
+                    # Access the log event properties (e.g., timestamp, message, etc.)
+                    timestamp = event['timestamp']
+                    message = event['message']
+          
+                    log_events.append({'Timestamp': timestamp, 'Message': message})
+            else:
+                return 'No log events found within the specified time range.'
+          
+            # Save log events to an S3 bucket with automation execution ID as prefix
+            s3_client = boto3.client('s3')
+            bucket_name = events['artifactbucket']  # Replace with your S3 bucket name
+            automation_execution_id = context['automation:EXECUTION_ID']
+            object_key = f"fss-support-tool/{automation_execution_id}/listener_log_events.json"
+            s3_client.put_object(Body=json.dumps(log_events), Bucket=bucket_name, Key=object_key)
+          
+            # Create a reference to the S3 object in the output field
+            s3_url = f"s3://{bucket_name}/{object_key}"
+            return {'bucketlistenerlogsS3Url': s3_url}
+      InputPayload:
+        listener: '{{CloudFormationLogGroupStreamNameCollection.listenerloggroupname}}'
+        artifactbucket: '{{ArtifactBucket}}'
+    description: FSS Bucket listener lambda Log Collection
+    outputs:
+      - Name: Listenerlogs
+        Selector: $.Payload.bucketlistenerlogsS3Url
+        Type: String
+  - name: CollectScannerLambdaLogs
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |
+        import boto3
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        def script_handler(events, context):
+            # Set the AWS region and CloudWatch Logs client
+            client = boto3.client('logs')
+          
+            # Get the current time in the specified time zone
+            current_time = datetime.now()
+            end_time = current_time
+            start_time = end_time - timedelta(minutes=5)
+          
+            # Round the milliseconds to the nearest thousandth
+            start_time_rounded = start_time.replace(microsecond=(start_time.microsecond // 1000) * 1000)
+            end_time_rounded = end_time.replace(microsecond=(end_time.microsecond // 1000) * 1000)
+          
+            # Convert start and end times to UTC
+            start_time_utc = start_time_rounded.replace(tzinfo=timezone.utc)
+            end_time_utc = end_time_rounded.replace(tzinfo=timezone.utc)
+          
+            # Convert start and end times to UNIX timestamps
+            start_timestamp = int(start_time_utc.timestamp() * 1000)
+            end_timestamp = int(end_time_utc.timestamp() * 1000)
+          
+            # Specify the log group name and query the log events within the time range
+            log_group_name = events["scanner"]  # Replace with your log group name
+            response = client.filter_log_events(
+                logGroupName=log_group_name,
+                startTime=start_timestamp,
+                endTime=end_timestamp
+            )
+          
+            log_events = []
+          
+            # Process the log events
+            if 'events' in response:
+                for event in response['events']:
+                    # Access the log event properties (e.g., timestamp, message, etc.)
+                    timestamp = event['timestamp']
+                    message = event['message']
+          
+                    log_events.append({'Timestamp': timestamp, 'Message': message})
+            else:
+                return 'No log events found within the specified time range.'
+          
+            # Save log events to an S3 bucket with automation execution ID as prefix
+            s3_client = boto3.client('s3')
+            bucket_name = events['artifactbucket']  # Replace with your S3 bucket name
+            automation_execution_id = context['automation:EXECUTION_ID']
+            object_key = f"fss-support-tool/{automation_execution_id}/scanner_log_events.json"
+            s3_client.put_object(Body=json.dumps(log_events), Bucket=bucket_name, Key=object_key)
+          
+            # Create a reference to the S3 object in the output field
+            s3_url = f"s3://{bucket_name}/{object_key}"
+            return {'ScannerlogsS3Url': s3_url}
+      InputPayload:
+        scanner: '{{CloudFormationLogGroupStreamNameCollection.scannerloggroupname}}'
+        artifactbucket: '{{ArtifactBucket}}'
+    description: FSS Scanner Lambda Log Collection
+    outputs:
+      - Name: Scannerlogs
+        Selector: $.Payload.ScannerlogsS3Url
+        Type: String
+  - name: CollectPostScanActionTagLambdaLogs
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |
+        import boto3
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        def script_handler(events, context):
+            # Set the AWS region and CloudWatch Logs client
+            client = boto3.client('logs')
+          
+            # Get the current time in the specified time zone
+            current_time = datetime.now()
+            end_time = current_time
+            start_time = end_time - timedelta(minutes=5)
+          
+            # Round the milliseconds to the nearest thousandth
+            start_time_rounded = start_time.replace(microsecond=(start_time.microsecond // 1000) * 1000)
+            end_time_rounded = end_time.replace(microsecond=(end_time.microsecond // 1000) * 1000)
+          
+            # Convert start and end times to UTC
+            start_time_utc = start_time_rounded.replace(tzinfo=timezone.utc)
+            end_time_utc = end_time_rounded.replace(tzinfo=timezone.utc)
+          
+            # Convert start and end times to UNIX timestamps
+            start_timestamp = int(start_time_utc.timestamp() * 1000)
+            end_timestamp = int(end_time_utc.timestamp() * 1000)
+          
+            # Specify the log group name and query the log events within the time range
+            log_group_name = events["posttag"]  # Replace with your log group name
+            response = client.filter_log_events(
+                logGroupName=log_group_name,
+                startTime=start_timestamp,
+                endTime=end_timestamp
+            )
+          
+            log_events = []
+          
+            # Process the log events
+            if 'events' in response:
+                for event in response['events']:
+                    # Access the log event properties (e.g., timestamp, message, etc.)
+                    timestamp = event['timestamp']
+                    message = event['message']
+          
+                    log_events.append({'Timestamp': timestamp, 'Message': message})
+            else:
+                return 'No log events found within the specified time range.'
+          
+            # Save log events to an S3 bucket with automation execution ID as prefix
+            s3_client = boto3.client('s3')
+            bucket_name = events['artifactbucket']  # Replace with your S3 bucket name
+            automation_execution_id = context['automation:EXECUTION_ID']
+            object_key = f"fss-support-tool/{automation_execution_id}/post_tag_log_events.json"
+            s3_client.put_object(Body=json.dumps(log_events), Bucket=bucket_name, Key=object_key)
+          
+            # Create a reference to the S3 object in the output field
+            s3_url = f"s3://{bucket_name}/{object_key}"
+            return {'posttaglogsS3Url': s3_url}
+      InputPayload:
+        posttag: '{{CloudFormationLogGroupStreamNameCollection.posttagloggroupname}}'
+        artifactbucket: '{{ArtifactBucket}}'
+    outputs:
+      - Name: PostTaglogs
+        Selector: $.Payload.posttaglogsS3Url
+        Type: String
+    description: Collect the event logs from the post action tag lambda
