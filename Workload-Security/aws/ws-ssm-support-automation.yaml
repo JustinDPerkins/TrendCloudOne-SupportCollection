@@ -1,0 +1,131 @@
+description: Generate Trend Micro Deep Security diagnostic package and upload to S3
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: (Required) The ARN of the role that allows Automation to perform the actions on your behalf
+  InstanceIds:
+    type: StringList
+    description: EC2 instance ID
+  S3BucketName:
+    type: String
+    description: S3 bucket name to upload the diagnostic package
+mainSteps:
+  - name: GetSSMInstanceInformation
+    action: 'aws:executeAwsApi'
+    inputs:
+      Service: ssm
+      Api: DescribeInstanceInformation
+      Filters:
+        - Key: InstanceIds
+          Values:
+            - '{{ InstanceIds }}'
+    outputs:
+      - Name: instances
+        Selector: $.InstanceInformationList
+        Type: MapList
+  - name: CompileInstanceList
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      InputPayload:
+        instances: '{{ GetSSMInstanceInformation.instances }}'
+      Script: |-
+        def script_handler(events, context):
+          window_instances = []
+          linux_instances = []
+
+          for instance in events['instances']:
+            if instance['PlatformType'] == 'Windows':
+              window_instances.append(instance['InstanceId'])
+            elif instance['PlatformType'] == 'Linux':
+              linux_instances.append(instance['InstanceId'])
+            else:
+              raise ValueError('Unsupported platform {}'.format(instance['PlatformType']))
+            
+          return {
+            'windows_instances': window_instances,
+            'linux_instances': linux_instances,
+            'contains_windows_instances': any(window_instances),
+            'contains_linux_instances': any(linux_instances)
+          }
+    outputs:
+      - Name: windows_instances
+        Selector: $.Payload.windows_instances
+        Type: StringList
+      - Name: linux_instances
+        Selector: $.Payload.linux_instances
+        Type: StringList
+      - Name: contains_windows_instances
+        Selector: $.Payload.contains_windows_instances
+        Type: Boolean
+      - Name: contains_linux_instances
+        Selector: $.Payload.contains_linux_instances
+        Type: Boolean
+  - name: BranchExecuteWindowsDiagnosticPackage
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: ExecuteDiagnosticPackageWindows
+          Variable: '{{ CompileInstanceList.contains_windows_instances }}'
+          BooleanEquals: true
+      Default: BranchExecuteLinuxDiagnosticPackage
+  - name: ExecuteDiagnosticPackageWindows
+    action: 'aws:runCommand'
+    onFailure: Continue
+    inputs:
+      InstanceIds: '{{ CompileInstanceList.windows_instances }}'
+      DocumentName: AWS-RunShellScript
+      Parameters:
+        commands:
+          - |
+            # Run the Deep Security diagnostic package command
+            $output = & "C:\Program Files\Trend Micro\Deep Security Agent\dsa_control" -d
+
+            # Extract the path and file name from the output
+            $path = $output -replace ".*path = (.*?)(\s.*|$)", '$1'
+            $file_name = $output -replace ".*file name = (.*?)(\s.*|$)", '$1'
+            $full_path = "$path\$file_name"
+
+            # Wait for 90 seconds
+            Start-Sleep -Seconds 90
+
+            # Change directory to the diagnostic package path
+            Set-Location -Path "$path"
+
+            # Upload the file to S3
+            aws s3 cp "$file_name" s3://{{ S3BucketName }}/ws-support-tool/{{automation:EXECUTION_ID}}/windows_agent_diag.zip
+  - name: BranchExecuteLinuxDiagnosticPackage
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: ExecuteDiagnosticPackageLinux
+          Variable: '{{ CompileInstanceList.contains_linux_instances }}'
+          BooleanEquals: true
+    isEnd: true
+  - name: ExecuteDiagnosticPackageLinux
+    action: 'aws:runCommand'
+    inputs:
+      InstanceIds: '{{ CompileInstanceList.linux_instances }}'
+      DocumentName: AWS-RunShellScript
+      Parameters:
+        commands:
+          - |
+            sudo su
+            output=$(sudo /opt/ds_agent/dsa_control -d)
+            path=$(echo "$output" | awk -F 'path =' '{print $2}' | awk '{$1=$1;print}')
+            file_name=$(echo "$output" | awk -F 'file name =' '{print $2}' | awk '{$1=$1;print}' | tr -d '[:space:]')
+            full_path="${path}/${file_name}"
+            echo $full_path
+            sleep 90
+            cd /var/opt/ds_agent/diag/
+            aws s3 cp "$file_name" s3://{{ S3BucketName }}/ws-support-tool/{{automation:EXECUTION_ID}}/linux_agent_diag.zip
+    outputs:
+      - Name: Path
+        Selector: $.Payload.path
+        Type: String
+      - Name: File
+        Selector: $.Payload.file
+        Type: String
