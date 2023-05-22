@@ -1,0 +1,22 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:SendCommand",
+                "s3:PutObject",
+                "cloudformation:ListStacks",
+                "ssm:ListCommands",
+                "cloudformation:DescribeStackEvents",
+                "ssm:DescribeInstanceInformation",
+                "cloudformation:DescribeStackResources",
+                "logs:FilterLogEvents",
+                "ssm:ListCommandInvocations",
+                "cloudformation:DescribeStacks"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
