@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SSMDescribeInstanceInformation",
+      "Effect": "Allow",
+      "Action": "ssm:DescribeInstanceInformation",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2DescribeInstances",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSMSendCommand",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "*"
+    }
+  ]
+}
