@@ -24,4 +24,4 @@ This tool is intended to aid in generating and collecting the File Storage Secur
 - Provide the ARN value of the IAM Role SSM will assume.(SSM Trusted Entity)
 - Proved the Scanner Stack Name.
 - Provide the Storage Stack Name.
-- Provide the Name of an S3 bucket to upload package to.(EC2 will need permissions to this bucket to put objects)
+- Provide the Name of an S3 bucket to upload package to.
