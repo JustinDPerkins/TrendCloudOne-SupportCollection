@@ -11,7 +11,7 @@ This tool is intended to aid in generating and collecting the File Storage Secur
 ---
 
 ### SSM Automation IAM role
-- Create an IAM Role for SSM Automations to Assume.
+- Create an IAM Role for SSM Automations to Assume. See example [SSM-Policy](https://github.com/JustinDPerkins/TrendCloudOne-SupportCollection/blob/main/File-Storage-Security/aws/ssm-iam-example-policy.json)
 
 ---
 
