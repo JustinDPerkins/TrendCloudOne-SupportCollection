@@ -18,7 +18,7 @@ The output of this tool can be provided to Trend Micro Support on case creation.
 
 ---
 
-### What is supported?
+### Limitations:
 - Same Account/Region FSS Deployments.
 
 ---
