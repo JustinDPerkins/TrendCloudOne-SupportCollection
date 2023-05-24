@@ -21,7 +21,6 @@ The output of this tool can be provided to Trend Micro Support on case creation.
 ---
 
 ### Limitations:
-- One Instance Per Execution
 - Same Account/Region
 
 ---
@@ -36,7 +35,7 @@ The output of this tool can be provided to Trend Micro Support on case creation.
 ### Via AWS Console?
 Systems Manager > Documents > All Documents > "Trend-WorkloadSecurity-SupportCollectionTool"
 - Provide the ARN value of the SSM Automation Operation IAM Role will assume.(SSM Trusted Entity)
-- Provide an Instance ID. (i-1234567890)
+- Provide a single or comma seperated list of Instance ID. (i-1234567890,...,...)
 - Provide the Name of the S3 bucket to upload the diagnostic package to.(EC2 will need permissions to this bucket to put objects)
 
 ### Via AWS CLI:
