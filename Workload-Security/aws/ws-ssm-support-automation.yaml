@@ -1,19 +1,28 @@
-description: |
+description: |+
   # Trend Cloud One Workload Security - Agent Diagnostic Collection Tool
 
   This tool is intended to aid in generating and collecting the workload security agent diagnostic log package.
+  The output of this tool can be provided to Trend Micro Support on case creation.
 
   ---
 
-  ### Requirements fo use.
-  - Workload Security Agent deployed on instance.
-  - Instance must have SSM Managed IAM Role and S3 to upload log package.
-  - SSM Automation IAM Role.
+  ## Requirements for use.
+
+  ### SSM Automation Operations IAM Role
+  - Create an IAM Role for SSM Automations to Assume to execute document. See example [SSM-Policy](https://github.com/JustinDPerkins/TrendCloudOne-SupportCollection/blob/main/Workload-Security/aws/ssm-iam-example-policy.json)
+  - The IAM Role requires SSM to be a Trusted Entity.
+
+  ### Instance Requirements:
+  - Requires Workload Security Agent to be deployed on instance.
+  - Requires SSM Agent to be Installed and Running. See [here](https://docs.aws.amazon.com/systems-manager/latest/userguide/ssm-agent.html)
+  - The EC2 Instance requires an IAM Role with SSMManagedCore permissions.
+  - The EC2 will need an IAM Role with S3:PutObject permissions to upload diagnostic package to S3.
+  - The Instance will require the AWS CLI to be installed. See [here](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 
   ---
 
-  ### SSM Automation IAM role
-  - Create an IAM Role for SSM Automations to Assume.
+  ### Limitations:
+  - Same Account/Region
 
   ---
 
@@ -22,11 +31,23 @@ description: |
   - Windows OS
 
   ---
+  ## How Can this tool be used?
 
-  ### How to run?
-  - Provide the ARN value of the IAM Role SSM will assume.(SSM Trusted Entity)
-  - Proved the Instance ID. (i-1234567890)
-  - Provide the Name of an S3 bucket to upload package to.(EC2 will need permissions to this bucket to put objects)
+  ### Via AWS Console?
+  Systems Manager > Documents > All Documents > "Trend-WorkloadSecurity-SupportCollectionTool"
+  - Provide the ARN value of the SSM Automation Operation IAM Role will assume.(SSM Trusted Entity)
+  - Provide a single or comma seperated list of Instance ID. (i-1234567890,...,...)
+  - Provide the Name of the S3 bucket to upload the diagnostic package to.(EC2 will need permissions to this bucket to put objects)
+
+  ### Via AWS CLI:
+  - Linux CLI:
+
+  ```
+  aws ssm start-automation-execution --document-name "Trend-WorkloadSecurity-SupportCollectionTool" --document-version "\$DEFAULT" --parameters '{"AutomationAssumeRole":["<SSM IAM Automation Role ARN Here>"],"InstanceIds":["<Instance-ID-Here>"],"S3BucketName":["<Bucket-4-Artifact-Name-Here>"]}' --region us-east-1
+  111
+  ```
+
+
 schemaVersion: '0.3'
 assumeRole: '{{ AutomationAssumeRole }}'
 parameters:
@@ -35,7 +56,7 @@ parameters:
     description: (Required) The ARN of the role that allows Automation to perform the actions on your behalf
   InstanceIds:
     type: StringList
-    description: EC2 instance ID
+    description: EC2 instance ID. Comma Seperated ID's if multiple
   S3BucketName:
     type: String
     description: S3 bucket name to upload the diagnostic package
@@ -109,6 +130,7 @@ mainSteps:
       Parameters:
         commands:
           - |
+            $id = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/instance-id"
             # Run the Deep Security diagnostic package command
             cd  "C:\Program Files\Trend Micro\Deep Security Agent\" 
             $output = .\dsa_control -d
@@ -130,7 +152,7 @@ mainSteps:
 
             # Set the S3 bucket and file paths
             $bucketName = "{{ S3BucketName }}"
-            $s3Key = "ws-support-tool/{{automation:EXECUTION_ID}}/windows_agent_diag.zip"
+            $s3Key = "ws-support-tool/{{automation:EXECUTION_ID}}/"+$id+"_windows_agent_diag.zip"
 
             # Upload the file to S3
             Write-S3Object -BucketName $bucketName -Key $s3Key -File $fileName
@@ -151,6 +173,7 @@ mainSteps:
         commands:
           - |
             sudo su
+            id=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
             output=$(sudo /opt/ds_agent/dsa_control -d)
             path=$(echo "$output" | awk -F 'path =' '{print $2}' | awk '{$1=$1;print}')
             file_name=$(echo "$output" | awk -F 'file name =' '{print $2}' | awk '{$1=$1;print}' | tr -d '[:space:]')
@@ -158,7 +181,7 @@ mainSteps:
             echo $full_path
             sleep 90
             cd /var/opt/ds_agent/diag/
-            aws s3 cp "$file_name" s3://{{ S3BucketName }}/ws-support-tool/{{automation:EXECUTION_ID}}/linux_agent_diag.zip
+            aws s3 cp "$file_name" s3://{{ S3BucketName }}/ws-support-tool/{{automation:EXECUTION_ID}}/${id}_linux_agent_diag.zip
     outputs:
       - Name: Path
         Selector: $.Payload.path
