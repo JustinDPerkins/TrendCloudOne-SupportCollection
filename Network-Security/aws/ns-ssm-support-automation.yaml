@@ -1,0 +1,163 @@
+description: |
+  # Trend Cloud One Network Security - VPC Configuration Collection Tool
+
+  This tool is intended to aid in generating and collecting the VPC configuration for Network Security Deployments.
+  The output of this tool can be provided to Trend Micro Support on case creation.
+
+  ---
+
+  ## Requirements for use.
+
+  ### SSM Automation Operations IAM Role
+  - Create an IAM Role for SSM Automations to Assume to execute document. See example [SSM-Policy](https://github.com/JustinDPerkins/TrendCloudOne-SupportCollection/blob/main/Network-Security/aws/ssm-iam-example-policy.json)
+  - The IAM Role requires SSM to be a Trusted Entity.
+  - The IAM Role will need S3:PutObject permissions to upload vpc configuration package to S3.
+
+  ---
+
+  ### Limitations:
+  - Same Account/Region
+
+  ---
+  ## How Can this tool be used?
+
+  ### Via AWS Console?
+  Systems Manager > Documents > All Documents > "Trend-NetworkSecurity-SupportCollectionTool"
+  - Provide the ARN value of the SSM Automation Operation IAM Role will assume.(SSM Trusted Entity)
+  - Provide a singular VPC-ID value.
+  - Provide the Name of the S3 bucket to upload the package to.
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: (Required) The ARN of the role that allows Automation to perform the actions on your behalf
+  VpcId:
+    type: String
+    description: The ID of the VPC for which to create the diagram
+  ArtifactBucket:
+    type: String
+    description: The name of the S3 bucket to upload the diagram
+mainSteps:
+  - name: GatherVPCConfiguration
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.7
+      Handler: script_handler
+      Script: |
+        import boto3
+
+        def describe_load_balancers(elbv2_client):
+            marker = ""
+            load_balancers = []
+            while True:
+                response = elbv2_client.describe_load_balancers(Marker=marker, PageSize=100)
+                load_balancers.extend(response['LoadBalancers'])
+                if 'NextMarker' in response:
+                    marker = response['NextMarker']
+                else:
+                    break
+            return load_balancers
+
+        def script_handler(events, context):
+            automation_execution_id = context['automation:EXECUTION_ID']
+            # Create a new session using your AWS credentials
+            vpc_id = events['vpc']
+            bucket_name = events['bucketName']
+            file_name = f"ns-support-tool/{automation_execution_id}/vpc-configuration.txt"
+            session = boto3.Session()
+
+            # Create a new EC2 client
+            ec2_client = session.client('ec2')
+
+            # Retrieve information about the VPC
+            response = ec2_client.describe_vpcs(VpcIds=[vpc_id])
+            vpc = response['Vpcs'][0]
+            vpc_name = ""
+            vpc_cidr = vpc['CidrBlock']
+
+            # Retrieve the VPC name (if available)
+            if 'Tags' in vpc:
+                for tag in vpc['Tags']:
+                    if tag['Key'] == 'Name':
+                        vpc_name = tag['Value']
+                        break
+
+            # Generate the VPC information
+            diagram = 'VPC: {}\nName: {}\nVPC CIDR: {}\n\n'.format(vpc_id, vpc_name, vpc_cidr)
+
+            # Retrieve information about the route tables in the VPC
+            response = ec2_client.describe_route_tables(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+            route_tables = response['RouteTables']
+
+            # Generate the route table information
+            for route_table in route_tables:
+                route_table_id = route_table['RouteTableId']
+                route_table_name = ""
+
+                # Retrieve the route table name (if available)
+                if 'Tags' in route_table:
+                    for tag in route_table['Tags']:
+                        if tag['Key'] == 'Name':
+                            route_table_name = tag['Value']
+                            break
+
+                diagram += 'Route Table: {}\nID: {}\n'.format(route_table_name, route_table_id)
+
+                # Retrieve information about the associated internet gateway (if any)
+                associated_igw = route_table.get('Associations', [{}])[0].get('GatewayId', 'None')
+                diagram += 'Associated internet gateways: {}\n'.format(associated_igw)
+
+                # Retrieve information about the routes in the route table
+                for route in route_table['Routes']:
+                    destination_cidr_block = route.get('DestinationCidrBlock', '')
+                    target = route.get('GatewayId', '')
+                    diagram += '    Destination: {}\n    Target: {}\n'.format(destination_cidr_block, target)
+
+                # Retrieve information about the associated subnets
+                subnet_ids = []
+                for association in route_table.get('Associations', []):
+                    if 'SubnetId' in association:
+                        subnet_ids.append(association['SubnetId'])
+                if subnet_ids:
+                    subnet_response = ec2_client.describe_subnets(SubnetIds=subnet_ids)
+                    subnets = subnet_response['Subnets']
+
+                    diagram += '    Associated Subnets:\n'
+                    for subnet in subnets:
+                        subnet_name = ""
+                        subnet_id = subnet['SubnetId']
+                        subnet_cidr = subnet['CidrBlock']
+
+                        # Check if the subnet is associated with a load balancer
+                        elbv2_client = session.client('elbv2')
+                        load_balancers = describe_load_balancers(elbv2_client)
+                        associated_lb = False
+                        for lb in load_balancers:
+                            lb_arn = lb['LoadBalancerArn']
+                            lb_scheme = lb['Scheme']
+                            lb_subnets = lb['AvailabilityZones']
+                            lb_subnet_ids = [az['SubnetId'] for az in lb_subnets]
+                            if subnet_id in lb_subnet_ids:
+                                associated_lb = True
+                                diagram += '        Subnets: {}\n        Subnet ID: {}\n        CIDR: {}\n        Associated with Load Balancer\n        Load Balancer Info:\n        ID: {}\n        Scheme: {}\n'.format(
+                                    subnet_name, subnet_id, subnet_cidr, lb_arn, lb_scheme)
+                                break
+
+                        if not associated_lb:
+                            diagram += '        Subnets: {}\n        Subnet ID: {}\n        CIDR: {}\n'.format(
+                                subnet_name, subnet_id, subnet_cidr)
+
+                diagram += '\n------------------------------------\n\n'
+
+            # Save the diagram to a file
+            s3_client = session.client('s3')
+            s3_client.put_object(Body=diagram, Bucket=bucket_name, Key=file_name)
+
+            return {
+                'statusCode': 200,
+                'body': 'Diagram generated successfully.'
+            }
+      InputPayload:
+        vpc: '{{VpcId}}'
+        bucketName: '{{ArtifactBucket}}'
