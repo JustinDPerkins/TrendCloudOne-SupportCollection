@@ -15,7 +15,6 @@ The output of this tool can be provided to Trend Micro Support on case creation.
 - File Storage Security must be deployed and monitoring a S3 bucket.
 
 
-
 ---
 
 ### Limitations:
