@@ -1,7 +1,7 @@
 description: |-
   # Trend Cloud One File Storage Security - CloudWatch Log Collection Tool
 
-  This tool is intended to aid in generating and collecting the File Storage Security lambda cloudwatch logs.
+  This tool is intended to aid in generating and collecting the File Storage Security lambda cloudwatch logs
 
   ---
 
